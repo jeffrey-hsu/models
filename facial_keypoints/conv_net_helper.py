@@ -36,6 +36,25 @@ def loadXY(df):
     return X, Y
 
 
+cols_dict = {
+    "eye_ct" : ["left_eye_center_x", "left_eye_center_y",
+                "right_eye_center_x", "right_eye_center_y"],
+    "eye_cr" : ["left_eye_inner_corner_x", "left_eye_inner_corner_y",
+                "left_eye_outer_corner_x", "left_eye_outer_corner_y",
+                "right_eye_inner_corner_x", "right_eye_inner_corner_y",
+                "right_eye_outer_corner_x", "right_eye_outer_corner_y"],
+    "eyebrow" : ["left_eyebrow_inner_end_x", "left_eyebrow_inner_end_y",
+                 "left_eyebrow_outer_end_x", "left_eyebrow_outer_end_y",
+                 "right_eyebrow_inner_end_x", "right_eyebrow_inner_end_y",
+                 "right_eyebrow_outer_end_x", "right_eyebrow_outer_end_y"],
+    "nose" : ["nose_tip_x", "nose_tip_y"],
+    "mouth_cr" : ["mouth_left_corner_x", "mouth_left_corner_y",
+                           "mouth_right_corner_x", "mouth_right_corner_y"],
+    "mouth_ct_top" : ["mouth_center_top_lip_x", "mouth_center_top_lip_y"],
+    "mouth_ct_bottom" : ["mouth_center_bottom_lip_x", "mouth_center_bottom_lip_y"]
+}
+
+
 def subset_data(X, Y, full_keypoints, cols):
     """
     The function subsets the label data based on the keypoints
@@ -198,8 +217,9 @@ class convNetBuilder:
             (self.poolingSize, self.poolingSize), ignore_border=True), outdim=2), p1)    
         
         for i in range(self.numNNLayer - 1):
-            l = self.__dropout(T.maximum(T.dot(l, params[self.numConvLayers + i]), 0.), p2)
-        
+            #l = self.__dropout(T.maximum(T.dot(l, params[self.numConvLayers + i]), 0.), p2)
+            l = self.__dropout(
+                T.nnet.sigmoid(T.dot(self.__dropout(l, p2), params[self.numConvLayers + i])), p2)
         model = T.dot(l, params[self.numConvLayers + self.numNNLayer - 1])
         
         return model
@@ -208,8 +228,11 @@ class convNetBuilder:
         return ((self.Y_hat_train - self.Y)**2).sum() / (2 * N)
     
     def SGD(self, X, Y,
-            update_rule = "backprop", epochs = 10, 
-            miniBatchSize = 1, learning_rate = 0.01,
+            update_rule = "backprop",
+            epochs = 10, 
+            miniBatchSize = 1,
+            learning_rate = 0.01,
+            learningRateSchedule = None,
             validation = []):
         """
         Stochastic Gradient Descent:
@@ -219,6 +242,8 @@ class convNetBuilder:
         - epochs: positive integar >= 1
         - miniBatchSize: positive integar >= 1
         - learning_rate
+        - learningRateSchedule: list of learning rate in ndarray
+          format for each epoch. Default None
         - validation: [dev_data, dev_labels]
         """
         N = miniBatchSize
@@ -237,7 +262,7 @@ class convNetBuilder:
         #v = []
         #for i in range(len(self.params)):
         #    v.append(theano.shared( self.params[i].get_value() * 0. )
-
+        
         ## Training function
         train = theano.function(inputs=[self.X, self.Y],
                                 outputs=self.__training_cost(miniBatchSize),
@@ -246,21 +271,33 @@ class convNetBuilder:
                                 allow_input_downcast=True)
         for i in range(epochs):
             train_result[i,0] = i+1
+            
+            ## adapt learning rate based on scheduler
+            if learningRateSchedule is not None:
+                learning_rate = learningRateSchedule[i]
+            
+            ## training
             epochStartTime = time.time()
             for batchStart, batchEnd in zip(range(0, len(X), N), range(N, len(X), N)):
                 cost = train(X[batchStart:batchEnd], Y[batchStart:batchEnd])
+            
             train_result[i,1] = cost
             train_result[i,2] = np.sqrt(cost)*48
             train_result[i,3] = time.time() - epochStartTime
+            
+            ## get validation results is specified
             if validation != []:
                 pred, val_loss, val_rmse = self.predict(validation[0], validation[1])
                 val_result[i,0] = val_loss
                 val_result[i,1] = val_rmse
+            
+            ## print results for each training epoch
             print("\nEpoch:", i+1, "/", epochs)
             print("training time:", train_result[i,3], "s, -----",
                   "loss:", train_result[i,1], ", RMSE:", train_result[i,2])
             if validation != []:
                 print("validation loss:", val_result[i,0], ", val RMSE:", val_result[i,1])
+        
         return train_result, val_result
     
     def __weight_update(self, miniBatchSize, learning_rate, update_rule):
@@ -297,14 +334,14 @@ class convNetBuilder:
         updates = []
         for w, grad in zip(self.params, grads):
             ## acc is the cached accumulated gradient square
-            acc = theano.shared( w.get_value() )
+            acc = theano.shared(w.get_value()*0.)
             acc_new = decay * acc + (1-decay) * (grad**2)
             ## adding gradient scaling
             gradient_scaling = T.sqrt(acc_new) + epsilon
             grad = grad / gradient_scaling
             ## append updates for shared variable acc and weights
             updates.append((acc, acc_new))
-            updates.append((w, w - grad*learning_rate))
+            updates.append((w, w - grad * learning_rate))
         return updates
     
     def __get_validation_error(self, pred, Y):
@@ -322,13 +359,13 @@ class convNetBuilder:
 
 def save_layer_params(obj, filename): 
     filename = filename + "_weights"
-    f = open(filename, 'wb') 
+    f = open(filename, "wb") 
     cPickle.dump(obj, f, protocol=cPickle.HIGHEST_PROTOCOL)
     f.close() 
 
     
 def load_saved_params(filename):
-    f = open(filename, 'rb')
+    f = open(filename, "rb")
     layer_params =  cPickle.load(f)
     f.close()
     return layer_params    
