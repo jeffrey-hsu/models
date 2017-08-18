@@ -1,3 +1,9 @@
+## This module contains sets of functions for quickly building 
+## a deep convolutional neural network. The methods are tailored
+## towards facial keypoint detection Kaggle dataset. Check out
+## https://www.kaggle.com/c/facial-keypoints-detection for more
+## information on the dataset.
+
 import os
 import re
 import sys
@@ -5,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pandas.io.parsers import read_csv
 from sklearn.utils import shuffle
+from sklearn.cross_validation import train_test_split
 from six.moves import cPickle
 
 from sklearn.metrics import classification_report
@@ -15,7 +22,100 @@ from theano import tensor as T
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 from theano.tensor.nnet import conv2d
 from theano.tensor.signal.pool import pool_2d
+from keras.models import model_from_json
 
+
+## Loading data
+
+def float32(k):
+    return np.cast['float32'](k)
+
+FTRAIN = "../../../data/facial_keypoints/training.csv"
+FTEST = "../../../data/facial_keypoints/test.csv"
+
+def load(test=False, cols=None, ignoreIDs=None):
+    print("Loading data...")
+    fname = FTEST if test else FTRAIN
+    df = read_csv(os.path.expanduser(fname))  # load pandas dataframe
+    
+    # remove any images that are to be ignored
+    if ignoreIDs is not None:
+        df = df.drop(df.index[ignoreIDs])
+    
+    # The Image column has pixel values separated by space; convert
+    # the values to numpy arrays:
+    df['Image'] = df['Image'].apply(lambda im: np.fromstring(im, sep=' '))
+
+    if cols:  # get a subset of columns
+        df = df[list(cols) + ['Image']]
+
+    df = df.dropna()  # drop all rows that have missing values in them
+
+    X = np.vstack(df['Image'].values) / 255.  # scale pixel values to [0, 1]
+    X = X.astype(np.float32)
+
+    if not test:  # only FTRAIN has any target columns
+        y = df[df.columns[:-1]].values
+        y = (y - 48) / 48  # scale target coordinates to [-1, 1]
+        X, y = shuffle(X, y, random_state=42)  # shuffle train data
+        y = y.astype(np.float32)
+    else:
+        y = None
+    
+    print("Loading data Done")
+    return X, y 
+
+
+def load2d(test=False, cols=None, ignoreIDs=None):
+    X, y = load(test=test, cols=cols, ignoreIDs=ignoreIDs)
+    X = X.reshape(-1, 1, 96, 96)
+    return X, y
+
+
+def get_split_data(X,y):
+    train_data, dev_data, train_labels, dev_labels = train_test_split(X, y,
+                                                                      test_size=0.2,
+                                                                      random_state=42)
+    return train_data, dev_data, train_labels, dev_labels
+
+
+## Save Model, Retrieve Saved Model
+
+def save_model(model, name):
+    json_string = model.to_json()
+    architecture = name+'_architecture.json' 
+    weights = name+'_weights.h5'
+    open(architecture, 'w').write(json_string)
+    model.save_weights(weights)
+
+
+def retrieve_model(name, weights=True):
+    print('Retrieving model: {0}'.format(name))
+    architecture = name + '_architecture.json' 
+    model_saved = model_from_json(open(architecture).read())
+    
+    if weights:
+        weights = name+'_weights.h5'    
+        model_saved.load_weights(weights)
+    return model_saved
+
+
+def pop_layer(model):
+    if not model.outputs:
+        raise Exception('Sequential model cannot be popped: model is empty.')
+
+    model.layers.pop()
+    if not model.layers:
+        model.outputs = []
+        model.inbound_nodes = []
+        model.outbound_nodes = []
+    else:
+        model.layers[-1].outbound_nodes = []
+        model.outputs = [model.layers[-1].output]
+    model.built = False
+
+
+## Load data - Depreciated
 
 def load_data(path):
     ## load pandas dataframe
@@ -85,6 +185,8 @@ def load_2d_images(data, imageWidth):
     data = data.reshape(-1, 1, imageWidth, imageWidth)
     return data
 
+
+## Build convnet
 
 class convNetBuilder:
     """
@@ -160,26 +262,30 @@ class convNetBuilder:
             
             if convlayer == 0:
                 params[convlayer] = theano.shared( 
-                    np.asarray( 
-                        (np.random.randn(
-                         *(self.numFeatureMaps[convlayer], 1, self.patchWidth, self.patchHeight))*.01) ))
+                    np.random.randn(self.numFeatureMaps[convlayer], 1,
+                                    self.patchWidth, self.patchHeight)  
+                        / np.sqrt(2. / (  self.numFeatureMaps[convlayer]
+                                        * self.patchWidth 
+                                        * self.patchHeight )) 
+                ) 
             else:
                 params[convlayer] = theano.shared(
-                    np.asarray(
-                        (np.random.randn(
-                         *(self.numFeatureMaps[convlayer], self.numFeatureMaps[convlayer-1], 
-                              self.patchWidth, self.patchHeight))*.01) ))
+                    np.random.randn(self.numFeatureMaps[convlayer], self.numFeatureMaps[convlayer-1],
+                                    self.patchWidth, self.patchHeight)   
+                        / np.sqrt(2. / (  self.numFeatureMaps[convlayer] 
+                                        * self.numFeatureMaps[convlayer-1]
+                                        * self.patchWidth
+                                        * self.patchHeight)) 
+                )
         
-        firstNNLayer = int(self.numFeatureMaps[self.numConvLayers-1] * \
-        (self.imageWidth / (self.poolingSize ** self.numConvLayers))**2)
+        firstNNLayer = int(  self.numFeatureMaps[self.numConvLayers-1] 
+                           * ( self.imageWidth / (self.poolingSize ** self.numConvLayers) )**2 )
         
         for nnlayer in [i + self.numConvLayers for i in range(self.numNNLayer)]:
             
             if nnlayer == self.numConvLayers:
                 params[nnlayer] = theano.shared(
-                    np.asarray(
-                        (np.random.randn(
-                         *(firstNNLayer, self.numHiddenNodes))*.01) ))
+                    np.random.randn(firstNNLayer, self.numHiddenNodes)*.01)
             
             elif nnlayer == (self.numConvLayers+self.numNNLayer-1):
                 params[nnlayer] = theano.shared(
